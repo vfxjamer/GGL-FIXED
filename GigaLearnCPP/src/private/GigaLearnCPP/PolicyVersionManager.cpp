@@ -11,9 +11,9 @@
 using namespace nlohmann;
 
 GGL::PolicyVersionManager::PolicyVersionManager(
-	std::filesystem::path saveFolder, int maxVersions, uint64_t tsPerVersion, 
-	const SkillTrackerConfig& skillTrackerConfig, const RLGC::EnvSetConfig& envSetConfig, RenderSender* renderSender) : 
-	saveFolder(saveFolder), maxVersions(maxVersions), tsPerVersion(tsPerVersion), 
+	std::filesystem::path saveFolder, int maxVersions, uint64_t tsPerVersion,
+	const SkillTrackerConfig& skillTrackerConfig, const RLGC::EnvSetConfig& envSetConfig, RenderSender* renderSender) :
+	saveFolder(saveFolder), maxVersions(maxVersions), tsPerVersion(tsPerVersion),
 	renderSender(renderSender) {
 
 	skill.config = skillTrackerConfig;
@@ -51,7 +51,6 @@ GGL::PolicyVersion& GGL::PolicyVersionManager::AddVersion(ModelSet modelsToClone
 
 	SortVersions();
 
-	// Remove old versions
 	while (versions.size() > maxVersions) {
 		auto& toRemove = versions[0];
 		toRemove.models.Free();
@@ -64,7 +63,6 @@ GGL::PolicyVersion& GGL::PolicyVersionManager::AddVersion(ModelSet modelsToClone
 void GGL::PolicyVersionManager::SaveVersions() {
 	RG_NO_GRAD;
 
-	// Remove old saved versions
 	std::set<int64_t> allSavedTimesteps = Utils::FindNumberedDirs(saveFolder);
 
 	for (int64_t savedTimesteps : allSavedTimesteps) {
@@ -73,10 +71,8 @@ void GGL::PolicyVersionManager::SaveVersions() {
 			matchesVersion |= (savedTimesteps == version.timesteps);
 
 		if (matchesVersion) {
-			// We want to keep this
 			allSavedTimesteps.insert(savedTimesteps);
 		} else {
-			// Get rid of it
 			std::filesystem::remove_all(saveFolder / std::to_string(savedTimesteps));
 		}
 	}
@@ -89,7 +85,7 @@ void GGL::PolicyVersionManager::SaveVersions() {
 
 		version.models.Save(versionSaveFolder, false);
 
-		{ // Save JSON
+		{
 			auto jsonPath = versionSaveFolder / "STATS.json";
 
 			std::ofstream fOut(jsonPath);
@@ -126,8 +122,7 @@ void GGL::PolicyVersionManager::LoadVersions(ModelSet modelsTemplate, uint64_t c
 		PolicyVersion& version = AddVersion(modelsTemplate, savedTimesteps);
 		version.models.Load(path, false, false);
 
-		{ // Load JSON
-			// TODO: Repetitive
+		{
 			auto jsonPath = path / "STATS.json";
 			std::ifstream fIn(jsonPath);
 			RG_ASSERT(fIn.good());
@@ -155,12 +150,11 @@ void GGL::PolicyVersionManager::SortVersions() {
 
 void GGL::PolicyVersionManager::RunSkillMatches(PPOLearner* ppo, Report& report) {
 	RG_NO_GRAD;
-	
+
 	auto fnUpdateRatings = [this](SkillRating& winner, SkillRating& loser, RLGC::GameState& state) {
 		float& winnerRating = winner.GetRating(state, skill.config.initialRating);
 		float& loserRating = loser.GetRating(state, skill.config.initialRating);
-		
-		// Update according to ELO math
+
 		float expDelta = (loserRating - winnerRating) / 400;
 		float expected = 1 / (powf(10, expDelta) + 1);
 
@@ -168,7 +162,6 @@ void GGL::PolicyVersionManager::RunSkillMatches(PPOLearner* ppo, Report& report)
 		loserRating += skill.config.ratingInc * (expected - 1);
 	};
 
-	
 	Team newTeam;
 	int oldVersionIndex;
 	float totalSimTime;
@@ -182,15 +175,16 @@ void GGL::PolicyVersionManager::RunSkillMatches(PPOLearner* ppo, Report& report)
 		newTeam = (Team)Math::RandInt(0, 2);
 		totalSimTime = 0;
 
+		// Start a fresh skill match only once. Continuations intentionally keep
+		// the current environment state so a match can span multiple calls.
 		skill.envSet->Reset();
 	}
 	skill.doContinuation = false;
 
 	auto& oldVersion = versions[oldVersionIndex];
 
-	// Find which players are on which teams
 	std::vector<int>
-		newPlayers = {}, 
+		newPlayers = {},
 		oldPlayers = {};
 	for (int i = 0; i < skill.envSet->arenas.size(); i++) {
 		auto& state = skill.envSet->state.gameStates[i];
@@ -212,12 +206,13 @@ void GGL::PolicyVersionManager::RunSkillMatches(PPOLearner* ppo, Report& report)
 	SkillRating prevCurRatings = skill.curRatings;
 
 	float stepTime = skill.envSet->config.tickSkip * RLGC::CommonValues::TICK_TIME;
-	for (float t = 0; 
+	for (float t = 0;
 		t < skill.config.simTime && totalSimTime < skill.config.maxSimTime && skill.curGoals < skill.envSet->arenas.size();
 		t += stepTime, totalSimTime += stepTime) {
 
-		skill.envSet->Reset();
-
+		// Do not reset here: each iteration advances the same match by one step.
+		// Resetting here would turn skill evaluation into repeated kickoff -> one
+		// step -> reset cycles and invalidate the resulting ratings.
 		torch::Tensor tStates = DIMLIST2_TO_TENSOR<float>(skill.envSet->state.obs);
 		torch::Tensor tActionMasks = DIMLIST2_TO_TENSOR<uint8_t>(skill.envSet->state.actionMasks);
 
@@ -233,11 +228,11 @@ void GGL::PolicyVersionManager::RunSkillMatches(PPOLearner* ppo, Report& report)
 		torch::Tensor _tLogProbs;
 
 		PPOLearner::InferActionsFromModels(
-			ppo->models, tNewStates.to(ppo->device, true), tNewActionMasks.to(ppo->device, true), 
-			skill.config.deterministic, ppo->config.policyTemperature, ppo->config.useHalfPrecision, 
+			ppo->models, tNewStates.to(ppo->device, true), tNewActionMasks.to(ppo->device, true),
+			skill.config.deterministic, ppo->config.policyTemperature, ppo->config.useHalfPrecision,
 			&tNewActions, &_tLogProbs);
 		PPOLearner::InferActionsFromModels(
-			oldVersion.models, tOldStates.to(ppo->device, true), tOldActionMasks.to(ppo->device, true), 
+			oldVersion.models, tOldStates.to(ppo->device, true), tOldActionMasks.to(ppo->device, true),
 			skill.config.deterministic, ppo->config.policyTemperature, ppo->config.useHalfPrecision,
 			&tOldActions, &_tLogProbs);
 
@@ -287,9 +282,7 @@ void GGL::PolicyVersionManager::RunSkillMatches(PPOLearner* ppo, Report& report)
 	}
 
 	if (skill.curGoals < skill.envSet->arenas.size() && totalSimTime < skill.config.maxSimTime) {
-		// Not enough goals were scored, we will force a continuation where the same models keep playing from the end position
-		// This COULD switch versions, but it wouldn't be a big deal as it would just be the immediate next version
-		RG_LOG(" > Forcing continuation (" << skill.curGoals <<  "/" << skill.envSet->arenas.size() << ")");
+		RG_LOG(" > Forcing continuation (" << skill.curGoals << "/" << skill.envSet->arenas.size() << ")");
 		skill.doContinuation = true;
 		skill.prevOldVersionIndex = oldVersionIndex;
 		skill.prevNewTeam = newTeam;
@@ -301,7 +294,6 @@ void GGL::PolicyVersionManager::RunSkillMatches(PPOLearner* ppo, Report& report)
 
 void GGL::PolicyVersionManager::OnIteration(struct PPOLearner* ppo, Report& report, int64_t totalTimesteps, int64_t prevTotalTimesteps) {
 	if ((totalTimesteps / tsPerVersion > prevTotalTimesteps / tsPerVersion) || (prevTotalTimesteps == 0)) {
-		// Save version
 		AddVersion(ppo->GetPolicyModels(), totalTimesteps);
 	}
 
