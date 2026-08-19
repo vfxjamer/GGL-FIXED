@@ -1,0 +1,66 @@
+name: Apply PPO bug fixes
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/ppo-bug-hunt]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply fixes
+        shell: python
+        run: |
+          from pathlib import Path
+          root = Path('.')
+          p = root/'GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp'
+          s = p.read_text()
+          s = s.replace('float batchSizeRatio = (stop - start) / (float)config.batchSize;', 'float batchSizeRatio = (stop - start) / (float)batchActs.size(0);', 1)
+          s = s.replace('fnRunMinibatch(0, config.batchSize);', 'fnRunMinibatch(0, (int)batchActs.size(0));', 1)
+          old = '''for (int mbs = 0; mbs < config.batchSize; mbs += config.miniBatchSize) {\n\t\t\t\t\tint start = mbs;\n\t\t\t\t\tint stop = start + config.miniBatchSize;\n\t\t\t\t\tfnRunMinibatch(start, stop);\n\t\t\t\t}'''
+          new = '''for (int mbs = 0; mbs < (int)batchActs.size(0); mbs += config.miniBatchSize) {\n\t\t\t\t\tint start = mbs;\n\t\t\t\t\tint stop = std::min(start + config.miniBatchSize, (int)batchActs.size(0));\n\t\t\t\t\tfnRunMinibatch(start, stop);\n\t\t\t\t}'''
+          if old not in s: raise SystemExit('GPU PPO loop pattern not found')
+          s = s.replace(old, new, 1)
+          old = '''\t\tentropy /= actionMasks.to(torch::kFloat32).sum(-1).log();'''
+          new = '''\t\tauto validActionCount = actionMasks.to(torch::kFloat32).sum(-1);\n\t\tauto validActionLog = validActionCount.clamp_min(2).log();\n\t\tentropy = torch::where(validActionCount > 1, entropy / validActionLog, torch::zeros_like(entropy));'''
+          if old not in s: raise SystemExit('entropy pattern not found')
+          s = s.replace(old, new, 1)
+          old = '''\tif (models["shared_head"])\n\t\tmodels["shared_head"]->SetOptimLR(RS_MIN(policyLR, criticLR));'''
+          new = '''\tif (models["shared_head"]) {\n\t\tfloat sharedHeadLR = policyLR == 0 ? criticLR : (criticLR == 0 ? policyLR : RS_MIN(policyLR, criticLR));\n\t\tmodels["shared_head"]->SetOptimLR(sharedHeadLR);\n\t}'''
+          if old not in s: raise SystemExit('shared head LR pattern not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          p = root/'GigaLearnCPP/src/private/GigaLearnCPP/PPO/GAE.cpp'
+          s = p.read_text(); old='outRewClipPortion = (totalRew - totalClippedRew) / RS_MAX(totalRew, 1e-7f);'; new='outRewClipPortion = returnStd > 0 ? (totalRew - totalClippedRew) / RS_MAX(totalRew, 1e-7f) : 0;'
+          if old not in s: raise SystemExit('GAE pattern not found')
+          p.write_text(s.replace(old,new,1))
+          p = root/'GigaLearnCPP/src/private/GigaLearnCPP/Util/Models.h'
+          s = p.read_text(); old='Model() : config(PartialModelConfig{}), device({}), modelName(NULL) {} // Uninitialized init'; new='Model() : config(PartialModelConfig{}), device({}), modelName(NULL), optim(nullptr) {} // Uninitialized init'
+          if old not in s: raise SystemExit('Model ctor pattern not found')
+          s=s.replace(old,new,1); old='virtual ~Model() = default;'; new='''virtual ~Model() {\n\t\t\tdelete optim;\n\t\t\toptim = nullptr;\n\t\t}'''
+          if old not in s: raise SystemExit('Model dtor pattern not found')
+          p.write_text(s.replace(old,new,1))
+          p = root/'GigaLearnCPP/CMakeLists.txt'; s=p.read_text(); s2=s.replace('"libsrc/.h"','"libsrc/*.h"').replace('"libsrc/.hpp"','"libsrc/*.hpp"')
+          if s2==s: raise SystemExit('CMake pattern not found')
+          p.write_text(s2)
+      - name: Verify patches
+        run: |
+          grep -n 'batchActs.size(0)' GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp
+          grep -n 'validActionCount' GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp
+          grep -n 'sharedHeadLR' GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp
+          grep -n 'outRewClipPortion = returnStd' GigaLearnCPP/src/private/GigaLearnCPP/PPO/GAE.cpp
+          grep -n 'delete optim' GigaLearnCPP/src/private/GigaLearnCPP/Util/Models.h
+          grep -n 'libsrc/\\*\\.h' GigaLearnCPP/CMakeLists.txt
+      - name: Commit fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add GigaLearnCPP
+          git commit -m 'fix: resolve PPO batching, entropy, LR, GAE and optimizer bugs' || exit 0
+          git push origin HEAD:fix/ppo-bug-hunt
