@@ -17,7 +17,7 @@ find_package(Torch REQUIRED)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
 # Add all headers and code files
-file(GLOB_RECURSE FILES_SRC "src/*.cpp" "src/*.h" "src/*.hpp" "libsrc/*.cpp" "libsrc/.h" "libsrc/.hpp")
+file(GLOB_RECURSE FILES_SRC "src/*.cpp" "src/*.h" "src/*.hpp" "libsrc/*.cpp" "libsrc/*.h" "libsrc/*.hpp")
 
 add_library(GigaLearnCPP SHARED ${FILES_SRC})
 target_compile_definitions(GigaLearnCPP PRIVATE -DWITHIN_GGL)
@@ -71,7 +71,7 @@ if (MSVC)
                  $<TARGET_FILE_DIR:GigaLearnCPP>)
 endif (MSVC)
 
-# Make our python files copy over to our build dir
+# Make sure Python files copy over to our build dir
 configure_file("./python_scripts/metric_receiver.py" "../python_scripts/metric_receiver.py" COPY)
 configure_file("./python_scripts/render_receiver.py" "../python_scripts/render_receiver.py" COPY)
 
