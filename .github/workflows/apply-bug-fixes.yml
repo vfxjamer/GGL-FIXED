@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [fix/ppo-bug-hunt]
+  pull_request:
+    branches: [main]
 permissions:
   contents: write
 jobs:
@@ -17,7 +19,6 @@ jobs:
         run: |
           from pathlib import Path
           root = Path('.')
-
           p = root/'GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp'
           s = p.read_text()
           s = s.replace('float batchSizeRatio = (stop - start) / (float)config.batchSize;', 'float batchSizeRatio = (stop - start) / (float)batchActs.size(0);', 1)
@@ -35,29 +36,18 @@ jobs:
           if old not in s: raise SystemExit('shared head LR pattern not found')
           s = s.replace(old, new, 1)
           p.write_text(s)
-
           p = root/'GigaLearnCPP/src/private/GigaLearnCPP/PPO/GAE.cpp'
-          s = p.read_text()
-          old = 'outRewClipPortion = (totalRew - totalClippedRew) / RS_MAX(totalRew, 1e-7f);'
-          new = 'outRewClipPortion = returnStd > 0 ? (totalRew - totalClippedRew) / RS_MAX(totalRew, 1e-7f) : 0;'
-          if old not in s: raise SystemExit('GAE clipping metric pattern not found')
-          p.write_text(s.replace(old, new, 1))
-
+          s = p.read_text(); old='outRewClipPortion = (totalRew - totalClippedRew) / RS_MAX(totalRew, 1e-7f);'; new='outRewClipPortion = returnStd > 0 ? (totalRew - totalClippedRew) / RS_MAX(totalRew, 1e-7f) : 0;'
+          if old not in s: raise SystemExit('GAE pattern not found')
+          p.write_text(s.replace(old,new,1))
           p = root/'GigaLearnCPP/src/private/GigaLearnCPP/Util/Models.h'
-          s = p.read_text()
-          old = 'Model() : config(PartialModelConfig{}), device({}), modelName(NULL) {} // Uninitialized init'
-          new = 'Model() : config(PartialModelConfig{}), device({}), modelName(NULL), optim(nullptr) {} // Uninitialized init'
-          if old not in s: raise SystemExit('Model default constructor pattern not found')
-          s = s.replace(old, new, 1)
-          old = 'virtual ~Model() = default;'
-          new = '''virtual ~Model() {\n\t\t\tdelete optim;\n\t\t\toptim = nullptr;\n\t\t}'''
-          if old not in s: raise SystemExit('Model destructor pattern not found')
-          p.write_text(s.replace(old, new, 1))
-
-          p = root/'GigaLearnCPP/CMakeLists.txt'
-          s = p.read_text()
-          s2 = s.replace('"libsrc/.h"', '"libsrc/*.h"').replace('"libsrc/.hpp"', '"libsrc/*.hpp"')
-          if s2 == s: raise SystemExit('CMake glob pattern not found')
+          s = p.read_text(); old='Model() : config(PartialModelConfig{}), device({}), modelName(NULL) {} // Uninitialized init'; new='Model() : config(PartialModelConfig{}), device({}), modelName(NULL), optim(nullptr) {} // Uninitialized init'
+          if old not in s: raise SystemExit('Model ctor pattern not found')
+          s=s.replace(old,new,1); old='virtual ~Model() = default;'; new='''virtual ~Model() {\n\t\t\tdelete optim;\n\t\t\toptim = nullptr;\n\t\t}'''
+          if old not in s: raise SystemExit('Model dtor pattern not found')
+          p.write_text(s.replace(old,new,1))
+          p = root/'GigaLearnCPP/CMakeLists.txt'; s=p.read_text(); s2=s.replace('"libsrc/.h"','"libsrc/*.h"').replace('"libsrc/.hpp"','"libsrc/*.hpp"')
+          if s2==s: raise SystemExit('CMake pattern not found')
           p.write_text(s2)
       - name: Verify patches
         run: |
