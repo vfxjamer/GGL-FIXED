@@ -42,7 +42,7 @@ std::vector<GGL::ExperienceTensors> GGL::ExperienceBuffer::GetAllBatchesShuffled
 	for (int64_t startIdx = 0; startIdx < (int64_t) expSize; startIdx += batchSize) {
 
 		int64_t remaining = (int64_t) expSize - startIdx;
-		int64_t curBatchSize = RS_MIN<int64_t>(batchSize, remaining);
+		int64_t curBatchSize = std::min<int64_t>(batchSize, remaining);
 
 		if (curBatchSize < batchSize && !overbatching)
 			break;
