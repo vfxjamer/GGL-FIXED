@@ -38,9 +38,9 @@ GGL::PPOLearner::PPOLearner(int obsSize, int numActions, PPOLearnerConfig _confi
 
 void GGL::PPOLearner::MakeModels(
 	bool makeCritic,
-	int obsSize, int numActions, 
+	int obsSize, int numActions,
 	PartialModelConfig sharedHeadConfig, PartialModelConfig policyConfig, PartialModelConfig criticConfig,
-	torch::Device device, 
+	torch::Device device,
 	ModelSet& outModels) {
 
 	ModelConfig fullPolicyConfig = policyConfig;
@@ -92,7 +92,7 @@ torch::Tensor GGL::PPOLearner::InferPolicyProbsFromModels(
 
 void GGL::PPOLearner::InferActionsFromModels(
 	ModelSet& models,
-	torch::Tensor obs, torch::Tensor actionMasks, 
+	torch::Tensor obs, torch::Tensor actionMasks,
 	bool deterministic, float temperature, bool halfPrec,
 	torch::Tensor* outActions, torch::Tensor* outLogProbs) {
 
@@ -130,10 +130,13 @@ torch::Tensor ComputeEntropy(torch::Tensor probs, torch::Tensor actionMasks, boo
 	auto entropy = -(probs.log() * probs).sum(-1);
 
 	if (maskEntropy) {
-		// Account for action masking in entropy
-		// We will effectively narrow the entropy to the scope of the valid actions
-		// This way states with more masked actions don't just have inherently lower entropy
-		entropy /= actionMasks.to(torch::kFloat32).sum(-1).log();
+		// Account for action masking in entropy.
+		// States with <= 1 valid action have no meaningful normalized entropy,
+		// so return 0 instead of dividing by log(1) or log(0).
+		auto validActionCount = actionMasks.to(torch::kFloat32).sum(-1);
+		auto safeLogValidActionCount = validActionCount.clamp_min(2).log();
+		auto normalizedEntropy = entropy / safeLogValidActionCount;
+		entropy = torch::where(validActionCount > 1, normalizedEntropy, torch::zeros_like(entropy));
 	} else {
 		entropy /= logf(actionMasks.size(-1));
 	}
@@ -175,7 +178,11 @@ void GGL::PPOLearner::Learn(ExperienceBuffer& experience, Report& report, bool i
 			auto batchTargetValues = batch.targetValues;
 			auto batchAdvantages = batch.advantages;
 
-			auto fnRunMinibatch = [&](int start, int stop) {
+			const int64_t actualBatchSize = batchActs.size(0);
+			if (actualBatchSize <= 0)
+				continue;
+
+			auto fnRunMinibatch = [&](int64_t start, int64_t stop) {
 
 				float batchSizeRatio = (stop - start) / (float)config.batchSize;
 
@@ -270,14 +277,16 @@ void GGL::PPOLearner::Learn(ExperienceBuffer& experience, Report& report, bool i
 				}
 			};
 
-			
 			if (device.is_cpu()) {
-				// Just run one minibatch
-				fnRunMinibatch(0, config.batchSize);
+				// CPU path processes the complete returned batch, including an
+				// overbatched final batch.
+				fnRunMinibatch(0, actualBatchSize);
 			} else {
-				for (int mbs = 0; mbs < config.batchSize; mbs += config.miniBatchSize) {
-					int start = mbs;
-					int stop = start + config.miniBatchSize;
+				// GPU path must also use the actual returned batch size. The final
+				// overbatched batch may be larger than config.batchSize and the final
+				// minibatch may be smaller than config.miniBatchSize.
+				for (int64_t start = 0; start < actualBatchSize; start += config.miniBatchSize) {
+					int64_t stop = std::min<int64_t>(start + config.miniBatchSize, actualBatchSize);
 					fnRunMinibatch(start, stop);
 				}
 			}
@@ -396,8 +405,19 @@ void GGL::PPOLearner::SetLearningRates(float policyLR, float criticLR) {
 	models["policy"]->SetOptimLR(policyLR);
 	models["critic"]->SetOptimLR(criticLR);
 
-	if (models["shared_head"])
-		models["shared_head"]->SetOptimLR(RS_MIN(policyLR, criticLR));
+	if (models["shared_head"]) {
+		// If only one branch is being trained, the shared head must inherit that
+		// branch's LR rather than being frozen by min(0, activeLR).
+		float sharedLR;
+		if (policyLR == 0)
+			sharedLR = criticLR;
+		else if (criticLR == 0)
+			sharedLR = policyLR;
+		else
+			sharedLR = RS_MIN(policyLR, criticLR);
+
+		models["shared_head"]->SetOptimLR(sharedLR);
+	}
 
 	RG_LOG("PPOLearner: " << RS_STR(std::scientific << "Set learning rate to [" << policyLR << ", " << criticLR << "]"));
 }
