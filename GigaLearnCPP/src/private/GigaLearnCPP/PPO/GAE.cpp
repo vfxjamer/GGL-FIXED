@@ -57,6 +57,8 @@ void GGL::GAE::Compute(
 			if (clipRange > 0)
 				curReward = RS_CLAMP(curReward, -clipRange, clipRange);
 
+			// Track the clipped value only when reward standardization/clipping
+			// is actually active. Otherwise the clipping metric must remain 0.
 			totalClippedRew += abs(curReward);
 		} else {
 			curReward = _rews[step];
@@ -98,5 +100,12 @@ void GGL::GAE::Compute(
 	outReturns = torch::tensor(_outReturns);
 	outAdvantages = torch::tensor(_outAdvantages);
 	outTargetValues = valPreds.slice(0, 0, numReturns) + outAdvantages;
-	outRewClipPortion = (totalRew - totalClippedRew) / RS_MAX(totalRew, 1e-7f);
+
+	// Reward clipping is not active when returnStd == 0, so the metric must
+	// explicitly report zero instead of interpreting the untouched counters as
+	// 100% clipping.
+	if (returnStd == 0 || totalRew <= 0)
+		outRewClipPortion = 0;
+	else
+		outRewClipPortion = (totalRew - totalClippedRew) / totalRew;
 }
