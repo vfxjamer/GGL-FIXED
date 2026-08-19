@@ -15,7 +15,7 @@ GGL::ExperienceTensors GGL::ExperienceBuffer::_GetSamples(const int64_t* indices
 	ExperienceTensors result;
 
 auto* toItr = result.begin();
-	auto* fromItr = data.begin();
+auto* fromItr = data.begin();
 	for (; toItr != result.end(); toItr++, fromItr++)
 		*toItr = torch::index_select(*fromItr, 0, tIndices);
 
@@ -30,23 +30,21 @@ std::vector<GGL::ExperienceTensors> GGL::ExperienceBuffer::GetAllBatchesShuffled
 		RG_ERR_CLOSE("ExperienceBuffer: batchSize must be greater than 0");
 
 	size_t expSize = data.states.size(0);
+	if (expSize == 0)
+		return {};
 
-	// Make list of shuffled sample indices
 	int64_t* indices = new int64_t[expSize];
-	std::iota(indices, indices + expSize, 0); // Fill ascending indices
+	std::iota(indices, indices + expSize, 0);
 	std::shuffle(indices, indices + expSize, rng);
 
-	// Get a sample set from each of the batches. If overbatching is enabled,
-	// extend the final normal batch to include the entire remaining tail.
-	// This preserves the original overbatching semantics while ensuring the
-	// learner can process the returned batch in full.
 	std::vector<ExperienceTensors> result;
-	for (int64_t startIdx = 0; startIdx + batchSize <= (int64_t) expSize; startIdx += batchSize) {
+	// Retain the final undersized batch so no collected experience is silently
+	// discarded, including when the entire buffer is smaller than batchSize.
+	for (int64_t startIdx = 0; startIdx < (int64_t) expSize; startIdx += batchSize) {
+		int64_t curBatchSize = std::min<int64_t>(batchSize, (int64_t) expSize - startIdx);
 
-		int64_t curBatchSize = batchSize;
-		if (startIdx + batchSize * 2 > (int64_t) expSize && overbatching) {
+		if (overbatching && curBatchSize == batchSize && startIdx + batchSize * 2 > (int64_t) expSize)
 			curBatchSize = (int64_t) expSize - startIdx;
-		}
 
 		result.push_back(_GetSamples(indices + startIdx, (size_t) curBatchSize));
 	}
