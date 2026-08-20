@@ -1,0 +1,80 @@
+name: Apply PPO fixes
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp')
+          s = p.read_text()
+
+          old = '''\tif (config.miniBatchSize <= 0)\n\t\tRG_ERR_CLOSE("PPOLearner: config.miniBatchSize must be greater than 0");'''
+          new = '''\tif (config.miniBatchSize <= 0)\n\t\tRG_ERR_CLOSE("PPOLearner: config.miniBatchSize must be greater than 0");\n\tif (config.batchSize <= 0)\n\t\tRG_ERR_CLOSE("PPOLearner: config.batchSize must be greater than 0");\n\tif (!(config.policyTemperature > 0.0f) || !std::isfinite(config.policyTemperature))\n\t\tRG_ERR_CLOSE("PPOLearner: policyTemperature must be finite and greater than 0");'''
+          if old in s:
+              s = s.replace(old, new, 1)
+
+          old = '''\tconstexpr float ACTION_MIN_PROB = 1e-11f;\n\tconstexpr float ACTION_DISABLED_LOGIT = -1e10f;'''
+          new = '''\tconstexpr float ACTION_DISABLED_LOGIT = -std::numeric_limits<float>::infinity();'''
+          s = s.replace(old, new, 1)
+
+          old = '''\tauto result = torch::softmax(logits + ACTION_DISABLED_LOGIT * actionMasks.logical_not(), -1);\n\treturn result.view({ -1, models["policy"]->config.numOutputs }).clamp(ACTION_MIN_PROB, 1);'''
+          new = '''\tauto maskedLogits = torch::where(\n\t\tactionMasks,\n\t\tlogits,\n\t\ttorch::full_like(logits, ACTION_DISABLED_LOGIT)\n\t);\n\n\t// Hard action mask: disabled actions receive exactly zero probability.\n\t// Do not clamp probabilities afterward, otherwise disabled actions become\n\t// theoretically sampleable again.\n\treturn torch::softmax(maskedLogits, -1).view({ -1, models["policy"]->config.numOutputs });'''
+          if old not in s:
+              raise SystemExit('PPOLearner: masked probability block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\t// Compute log probs and entropy\n\tauto entropy = -(probs.log() * probs).sum(-1);'''
+          new = '''\t// Compute entropy without evaluating log(0). Disabled actions are\n\t// represented by exact zero probabilities after hard masking.\n\tauto safeProbs = probs.clamp_min(1e-11f);\n\tauto entropy = -(safeProbs.log() * probs).sum(-1);'''
+          if old not in s:
+              raise SystemExit('PPOLearner: entropy block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\t} else {\n\t\tentropy /= logf(actionMasks.size(-1));\n\t}'''
+          new = '''\t} else {\n\t\tconst int64_t actionCount = actionMasks.size(-1);\n\t\tif (actionCount > 1)\n\t\t\tentropy /= logf((float)actionCount);\n\t\telse\n\t\t\tentropy.zero_();\n\t}'''
+          if old not in s:
+              raise SystemExit('PPOLearner: unmasked entropy block not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          p = Path('GigaLearnCPP/src/private/GigaLearnCPP/PPO/ExperienceBuffer.cpp')
+          s = p.read_text()
+          old = '''\tTensor tIndices = torch::tensor(IList(indices, indices + size));'''
+          new = '''\t// index_select requires indices to live on the same device as the source tensor.\n\t// ExperienceBuffer is normally CPU-resident, but keeping this device-aware\n\t// avoids a silent CPU/CUDA mismatch if the buffer is ever moved.\n\tauto indexOptions = torch::TensorOptions()\n\t\t.dtype(torch::kInt64)\n\t\t.device(data.states.device());\n\tTensor tIndices = torch::tensor(IList(indices, indices + size), indexOptions);'''
+          if old not in s:
+              raise SystemExit('ExperienceBuffer: index construction not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path('GigaLearnCPP/src/private/GigaLearnCPP/PPO/GAE.cpp')
+          s = p.read_text()
+          old = '''\tbool hasTruncValPreds = truncValPreds.defined();\n\n\tfloat prevLambda = 0;'''
+          new = '''\tbool hasTruncValPreds = truncValPreds.defined();\n\n\tif (!(gamma >= 0.0f && gamma <= 1.0f) || !std::isfinite(gamma))\n\t\tRG_ERR_CLOSE("GAE: gamma must be finite and in [0, 1]");\n\tif (!(lambda >= 0.0f && lambda <= 1.0f) || !std::isfinite(lambda))\n\t\tRG_ERR_CLOSE("GAE: lambda must be finite and in [0, 1]");\n\tif (returnStd < 0.0f || !std::isfinite(returnStd))\n\t\tRG_ERR_CLOSE("GAE: returnStd must be finite and >= 0");\n\tif (clipRange < 0.0f || !std::isfinite(clipRange))\n\t\tRG_ERR_CLOSE("GAE: clipRange must be finite and >= 0");\n\n\tif (!rews.device().is_cpu() || !terminals.device().is_cpu() || !valPreds.device().is_cpu() ||\n\t\t(hasTruncValPreds && !truncValPreds.device().is_cpu()))\n\t\tRG_ERR_CLOSE("GAE: Compute expects CPU tensors");\n\n\tif (rews.scalar_type() != torch::kFloat32 || valPreds.scalar_type() != torch::kFloat32 ||\n\t\t(hasTruncValPreds && truncValPreds.scalar_type() != torch::kFloat32) ||\n\t\tterminals.scalar_type() != torch::kInt8)\n\t\tRG_ERR_CLOSE("GAE: expected rewards/values float32 and terminals int8");\n\n\tfloat prevLambda = 0;'''
+          if old not in s:
+              raise SystemExit('GAE: validation insertion point not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+      - name: Commit fixes and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp GigaLearnCPP/src/private/GigaLearnCPP/PPO/ExperienceBuffer.cpp GigaLearnCPP/src/private/GigaLearnCPP/PPO/GAE.cpp
+          git rm .github/workflows/apply-ppo-fixes.yml
+          git diff --cached --check
+          git commit -m "fix: enforce hard action masks and validate PPO inputs"
+          git push
