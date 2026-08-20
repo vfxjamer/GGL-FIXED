@@ -1,0 +1,40 @@
+name: Finish PPO fixes
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add explicit includes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp')
+          s = p.read_text()
+          if '#include <limits>' not in s:
+              s = s.replace('#include <cmath>\n', '#include <cmath>\n#include <limits>\n', 1)
+          p.write_text(s)
+
+          p = Path('GigaLearnCPP/src/private/GigaLearnCPP/PPO/GAE.cpp')
+          s = p.read_text()
+          if not s.startswith('#include <cmath>'):
+              s = '#include <cmath>\n\n' + s
+          p.write_text(s)
+      - name: Commit and remove workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add GigaLearnCPP/src/private/GigaLearnCPP/PPO/PPOLearner.cpp GigaLearnCPP/src/private/GigaLearnCPP/PPO/GAE.cpp
+          git rm .github/workflows/finish-ppo-fixes.yml
+          git diff --cached --check
+          git commit -m "fix: add explicit PPO standard library includes"
+          git push
