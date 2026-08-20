@@ -1,3 +1,5 @@
+#include <cmath>
+
 #include "GAE.h"
 
 void GGL::GAE::Compute(
