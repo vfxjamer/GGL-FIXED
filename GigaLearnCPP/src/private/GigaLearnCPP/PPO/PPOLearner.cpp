@@ -15,6 +15,10 @@ GGL::PPOLearner::PPOLearner(int obsSize, int numActions, PPOLearnerConfig _confi
 
 	if (config.miniBatchSize <= 0)
 		RG_ERR_CLOSE("PPOLearner: config.miniBatchSize must be greater than 0");
+	if (config.batchSize <= 0)
+		RG_ERR_CLOSE("PPOLearner: config.batchSize must be greater than 0");
+	if (!(config.policyTemperature > 0.0f) || !std::isfinite(config.policyTemperature))
+		RG_ERR_CLOSE("PPOLearner: policyTemperature must be finite and greater than 0");
 
 	MakeModels(true, obsSize, numActions, config.sharedHead, config.policy, config.critic, device, models);
 
@@ -79,8 +83,7 @@ torch::Tensor GGL::PPOLearner::InferPolicyProbsFromModels(
 
 	actionMasks = actionMasks.to(torch::kBool);
 
-	constexpr float ACTION_MIN_PROB = 1e-11f;
-	constexpr float ACTION_DISABLED_LOGIT = -1e10f;
+	constexpr float ACTION_DISABLED_LOGIT = -std::numeric_limits<float>::infinity();
 
 	// An all-zero mask means the environment has declared every action invalid.
 	// Softmax over all disabled logits would otherwise produce an approximately
@@ -94,8 +97,16 @@ torch::Tensor GGL::PPOLearner::InferPolicyProbsFromModels(
 
 	auto logits = models["policy"]->Forward(obs, halfPrec) / temperature;
 
-	auto result = torch::softmax(logits + ACTION_DISABLED_LOGIT * actionMasks.logical_not(), -1);
-	return result.view({ -1, models["policy"]->config.numOutputs }).clamp(ACTION_MIN_PROB, 1);
+	auto maskedLogits = torch::where(
+		actionMasks,
+		logits,
+		torch::full_like(logits, ACTION_DISABLED_LOGIT)
+	);
+
+	// Hard action mask: disabled actions receive exactly zero probability.
+	// Do not clamp probabilities afterward, otherwise disabled actions become
+	// theoretically sampleable again.
+	return torch::softmax(maskedLogits, -1).view({ -1, models["policy"]->config.numOutputs });
 }
 
 void GGL::PPOLearner::InferActionsFromModels(
@@ -134,8 +145,10 @@ torch::Tensor GGL::PPOLearner::InferCritic(torch::Tensor obs) {
 }
 
 torch::Tensor ComputeEntropy(torch::Tensor probs, torch::Tensor actionMasks, bool maskEntropy) {
-	// Compute log probs and entropy
-	auto entropy = -(probs.log() * probs).sum(-1);
+	// Compute entropy without evaluating log(0). Disabled actions are
+	// represented by exact zero probabilities after hard masking.
+	auto safeProbs = probs.clamp_min(1e-11f);
+	auto entropy = -(safeProbs.log() * probs).sum(-1);
 
 	if (maskEntropy) {
 		// Account for action masking in entropy.
@@ -146,7 +159,11 @@ torch::Tensor ComputeEntropy(torch::Tensor probs, torch::Tensor actionMasks, boo
 		auto normalizedEntropy = entropy / safeLogValidActionCount;
 		entropy = torch::where(validActionCount > 1, normalizedEntropy, torch::zeros_like(entropy));
 	} else {
-		entropy /= logf(actionMasks.size(-1));
+		const int64_t actionCount = actionMasks.size(-1);
+		if (actionCount > 1)
+			entropy /= logf((float)actionCount);
+		else
+			entropy.zero_();
 	}
 
 	return entropy.mean();

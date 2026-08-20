@@ -8,6 +8,24 @@ void GGL::GAE::Compute(
 
 	bool hasTruncValPreds = truncValPreds.defined();
 
+	if (!(gamma >= 0.0f && gamma <= 1.0f) || !std::isfinite(gamma))
+		RG_ERR_CLOSE("GAE: gamma must be finite and in [0, 1]");
+	if (!(lambda >= 0.0f && lambda <= 1.0f) || !std::isfinite(lambda))
+		RG_ERR_CLOSE("GAE: lambda must be finite and in [0, 1]");
+	if (returnStd < 0.0f || !std::isfinite(returnStd))
+		RG_ERR_CLOSE("GAE: returnStd must be finite and >= 0");
+	if (clipRange < 0.0f || !std::isfinite(clipRange))
+		RG_ERR_CLOSE("GAE: clipRange must be finite and >= 0");
+
+	if (!rews.device().is_cpu() || !terminals.device().is_cpu() || !valPreds.device().is_cpu() ||
+		(hasTruncValPreds && !truncValPreds.device().is_cpu()))
+		RG_ERR_CLOSE("GAE: Compute expects CPU tensors");
+
+	if (rews.scalar_type() != torch::kFloat32 || valPreds.scalar_type() != torch::kFloat32 ||
+		(hasTruncValPreds && truncValPreds.scalar_type() != torch::kFloat32) ||
+		terminals.scalar_type() != torch::kInt8)
+		RG_ERR_CLOSE("GAE: expected rewards/values float32 and terminals int8");
+
 	float prevLambda = 0;
 	int numReturns = rews.size(0);
 	if (terminals.size(0) != numReturns)

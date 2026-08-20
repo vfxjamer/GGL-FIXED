@@ -10,7 +10,13 @@ GGL::ExperienceBuffer::ExperienceBuffer(int seed, torch::Device device) :
 GGL::ExperienceTensors GGL::ExperienceBuffer::_GetSamples(const int64_t* indices, size_t size) const {
 
 	// TODO: Slow, use blob
-	Tensor tIndices = torch::tensor(IList(indices, indices + size));
+	// index_select requires indices to live on the same device as the source tensor.
+	// ExperienceBuffer is normally CPU-resident, but keeping this device-aware
+	// avoids a silent CPU/CUDA mismatch if the buffer is ever moved.
+	auto indexOptions = torch::TensorOptions()
+		.dtype(torch::kInt64)
+		.device(data.states.device());
+	Tensor tIndices = torch::tensor(IList(indices, indices + size), indexOptions);
 
 	ExperienceTensors result;
 
