@@ -1,5 +1,6 @@
 #include "PPOLearner.h"
 
+#include <cmath>
 #include <torch/nn/utils/convert_parameters.h>
 #include <torch/nn/utils/clip_grad.h>
 #include <torch/csrc/api/include/torch/serialize.h>
@@ -12,8 +13,8 @@ GGL::PPOLearner::PPOLearner(int obsSize, int numActions, PPOLearnerConfig _confi
 	if (config.miniBatchSize == 0)
 		config.miniBatchSize = config.batchSize;
 
-	if (config.batchSize % config.miniBatchSize != 0)
-		RG_ERR_CLOSE("PPOLearner: config.batchSize (" << config.batchSize << ") must be a multiple of config.miniBatchSize (" << config.miniBatchSize << ")");
+	if (config.miniBatchSize <= 0)
+		RG_ERR_CLOSE("PPOLearner: config.miniBatchSize must be greater than 0");
 
 	MakeModels(true, obsSize, numActions, config.sharedHead, config.policy, config.critic, device, models);
 
@@ -80,6 +81,13 @@ torch::Tensor GGL::PPOLearner::InferPolicyProbsFromModels(
 
 	constexpr float ACTION_MIN_PROB = 1e-11f;
 	constexpr float ACTION_DISABLED_LOGIT = -1e10f;
+
+	// An all-zero mask means the environment has declared every action invalid.
+	// Softmax over all disabled logits would otherwise produce an approximately
+	// uniform distribution and allow an invalid action to be selected.
+	auto hasValidAction = actionMasks.any(-1);
+	if (!hasValidAction.all().item<bool>())
+		RG_ERR_CLOSE("PPOLearner: encountered an action mask with no valid actions");
 
 	if (models["shared_head"])
 		obs = models["shared_head"]->Forward(obs, halfPrec);
@@ -224,7 +232,8 @@ void GGL::PPOLearner::Learn(ExperienceBuffer& experience, Report& report, bool i
 					float curPolicyLoss = policyLoss.detach().cpu().item<float>();
 					avgPolicyLoss += curPolicyLoss;
 
-					avgRelEntropyLoss += (curEntropy * config.entropyScale) / curPolicyLoss;
+					if (std::abs(curPolicyLoss) > 1e-8f)
+						avgRelEntropyLoss += (curEntropy * config.entropyScale) / curPolicyLoss;
 
 					ppoLoss = (policyLoss - entropy * config.entropyScale) * batchSizeRatio;
 
